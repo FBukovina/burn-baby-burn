@@ -1,0 +1,275 @@
+#!/usr/bin/env bash
+# burn — a token-burning harness around Claude Code.
+# Usage: burn TOKENS [--model MODEL]
+set -euo pipefail
+
+FILLER_TOKENS=1000
+SYSTEM_OVERHEAD_TOKENS=9000      # measured: claude -p system prompt + tool defs
+TOKENS_PER_CALL=$(( SYSTEM_OVERHEAD_TOKENS + FILLER_TOKENS ))
+MIN_TOKENS=$TOKENS_PER_CALL      # asking for less than one call can't be honored
+FILLER_LINE="Burn baby burn, this is a disco inferno, burning tokens is for great engineers. "
+
+usage() {
+  cat <<EOF
+burn — spin up Claude Code in a loop to burn approximately N tokens.
+
+Usage:
+  burn TOKENS [--model MODEL]
+
+Arguments:
+  TOKENS         Target tokens to burn (minimum ${MIN_TOKENS}).
+
+Options:
+  --model NAME   Pass through to 'claude --model' (e.g. haiku, sonnet, opus).
+  -h, --help     Show this help and exit.
+EOF
+}
+
+model=""
+tokens=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --model)
+      if [[ $# -lt 2 ]]; then echo "error: --model requires a value" >&2; exit 2; fi
+      model="$2"; shift 2 ;;
+    --model=*) model="${1#*=}"; shift ;;
+    --) shift; break ;;
+    -*) echo "error: unknown flag: $1" >&2; usage >&2; exit 2 ;;
+    *)
+      if [[ -n "$tokens" ]]; then
+        echo "error: unexpected extra argument: $1" >&2
+        exit 2
+      fi
+      tokens="$1"; shift ;;
+  esac
+done
+
+if [[ -z "$tokens" ]]; then
+  usage >&2; exit 2
+fi
+if ! [[ "$tokens" =~ ^[0-9]+$ ]]; then
+  echo "error: TOKENS must be a positive integer (got '$tokens')" >&2; exit 2
+fi
+if (( tokens < MIN_TOKENS )); then
+  echo "error: tokens must be at least ${MIN_TOKENS} (got ${tokens})" >&2; exit 2
+fi
+
+if ! command -v claude >/dev/null 2>&1; then
+  echo "error: 'claude' CLI not found on PATH." >&2
+  echo "       install Claude Code first: https://docs.claude.com/claude-code" >&2
+  exit 1
+fi
+if ! command -v jq >/dev/null 2>&1; then
+  echo "error: 'jq' not found on PATH (used to parse Claude Code's JSON output)." >&2
+  echo "       install with: brew install jq" >&2
+  exit 1
+fi
+
+# ~4 chars/token is the standard rule of thumb for English text.
+target_chars=$(( FILLER_TOKENS * 4 ))
+filler_len=${#FILLER_LINE}
+repeats=$(( target_chars / filler_len ))
+(( repeats < 1 )) && repeats=1
+filler=""
+for ((i=0; i<repeats; i++)); do
+  filler+="$FILLER_LINE"
+done
+prompt=$(printf "Reply with the single word 'burned' and nothing else. Ignore the filler text below; it exists only to consume tokens.\n\n%s" "$filler")
+
+if [[ -t 1 ]]; then
+  ORANGE=$'\033[1;33m'
+  RED=$'\033[0;31m'
+  DIM=$'\033[2m'
+  RESET=$'\033[0m'
+  HIDE_CURSOR=$'\033[?25l'
+  SHOW_CURSOR=$'\033[?25h'
+else
+  ORANGE=''
+  RED=''
+  DIM=''
+  RESET=''
+  HIDE_CURSOR=''
+  SHOW_CURSOR=''
+fi
+
+PAD='        '
+
+# Three flame frames cycled to make the fire dance. Each row is exactly
+# 23 characters wide so it sits cleanly inside the fireplace opening.
+flame_frame() {
+  case "$1_$2" in
+    0_0) printf '%s' '    )      )      )    ' ;;
+    0_1) printf '%s' '   )\     )\     )\    ' ;;
+    0_2) printf '%s' '  ( ( (  ( ( (  ( ( (  ' ;;
+    0_3) printf '%s' '  ) ) )  ) ) )  ) ) )  ' ;;
+    0_4) printf '%s' '   \_/    \_/    \_/   ' ;;
+    1_0) printf '%s' '     (     (     (     ' ;;
+    1_1) printf '%s' '    /(    /(    /(     ' ;;
+    1_2) printf '%s' '  ( ( (  ( ( (  ( ( (  ' ;;
+    1_3) printf '%s' '  ( ) (  ) ( )  ( ) (  ' ;;
+    1_4) printf '%s' '   \_/    \_/    \_/   ' ;;
+    2_0) printf '%s' '    )      (      )    ' ;;
+    2_1) printf '%s' '   ((     )(     ((    ' ;;
+    2_2) printf '%s' '  ( ( (  ( ( (  ( ( (  ' ;;
+    2_3) printf '%s' '  ) ( )  ( ) (  ) ( )  ' ;;
+    2_4) printf '%s' '   \_/    \_/    \_/   ' ;;
+  esac
+}
+
+flame_color_for_row() {
+  case "$1" in
+    0|1) printf '%s' "$ORANGE" ;;
+    *)   printf '%s' "$RED" ;;
+  esac
+}
+
+print_flame_row() {
+  local frame=$1 row=$2 content color
+  content=$(flame_frame "$frame" "$row")
+  color=$(flame_color_for_row "$row")
+  printf '%s%s│░░░│%s%s%s%s%s│░░░│%s\n' \
+    "$PAD" "$DIM" "$RESET" "$color" "$content" "$RESET" "$DIM" "$RESET"
+}
+
+draw_fireplace() {
+  local frame=${1:-0}
+  printf '%s%s┌───────────────────────────────┐%s\n' "$PAD" "$DIM" "$RESET"
+  printf '%s%s│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│%s\n' "$PAD" "$DIM" "$RESET"
+  printf '%s%s│░░░┌───────────────────────┐░░░│%s\n' "$PAD" "$DIM" "$RESET"
+  printf '%s%s│░░░│                       │░░░│%s\n' "$PAD" "$DIM" "$RESET"
+  printf '%s%s│░░░│                       │░░░│%s\n' "$PAD" "$DIM" "$RESET"
+  for row in 0 1 2 3 4; do
+    print_flame_row "$frame" "$row"
+  done
+  printf '%s%s│░░░│                       │░░░│%s\n' "$PAD" "$DIM" "$RESET"
+  printf '%s%s│░░░│%s  %s▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓%s  %s│░░░│%s\n' \
+    "$PAD" "$DIM" "$RESET" "$RED" "$RESET" "$DIM" "$RESET"
+  printf '%s%s│░░░└───────────────────────┘░░░│%s\n' "$PAD" "$DIM" "$RESET"
+  printf '%s%s└───────────────────────────────┘%s\n' "$PAD" "$DIM" "$RESET"
+}
+
+# Distance (in lines) from the progress-bar cursor up to the top flame row:
+# blank line above bar + outer-bottom + inner-bottom + log + blank-below-flames
+# + 5 flame rows = 10.
+FLAME_OFFSET=10
+
+redraw_flames() {
+  local frame=$1
+  printf '\033[s'                       # save cursor
+  printf '\033[%dA\r' "$FLAME_OFFSET"   # move up to top flame row
+  for row in 0 1 2 3 4; do
+    print_flame_row "$frame" "$row"
+  done
+  printf '\033[u'                       # restore cursor
+}
+
+burned=0
+iteration=0
+total_cost=0.000000
+BAR_WIDTH=30
+claude_pid=""
+last_output=""
+
+claude_cmd=(claude -p --output-format json --no-session-persistence --tools "")
+if [[ -n "$model" ]]; then
+  claude_cmd+=(--model "$model")
+fi
+# `--tools` is variadic, so terminate flag parsing before the prompt.
+claude_cmd+=(--)
+
+draw_bar() {
+  local pct filled empty bar="" i suffix="${1:-}"
+  pct=$(( burned * 100 / tokens ))
+  (( pct > 100 )) && pct=100
+  filled=$(( pct * BAR_WIDTH / 100 ))
+  empty=$(( BAR_WIDTH - filled ))
+  for ((i=0; i<filled; i++)); do bar+='█'; done
+  for ((i=0; i<empty;  i++)); do bar+='░'; done
+  # \033[K clears any leftover characters from a longer previous draw.
+  printf "\r[%s] %3d%% • %d/%d tokens • \$%s • %d call(s)%s\033[K" \
+    "$bar" "$pct" "$burned" "$tokens" "$total_cost" "$iteration" "$suffix"
+}
+
+restore_cursor() {
+  printf '%s' "$SHOW_CURSOR"
+}
+trap restore_cursor EXIT
+
+on_interrupt() {
+  if [[ -n "$claude_pid" ]]; then
+    kill "$claude_pid" 2>/dev/null || true
+    wait "$claude_pid" 2>/dev/null || true
+  fi
+  echo
+  printf "stopped. burned %s tokens across %s call(s), spent \$%s.\n" \
+    "$burned" "$iteration" "$total_cost"
+  exit 130
+}
+trap on_interrupt INT
+
+# Run one claude call in the background while animating flames. On success
+# leaves the parsed stdout in $last_output. Returns the claude exit status.
+run_claude() {
+  local output_file
+  output_file=$(mktemp)
+  "${claude_cmd[@]}" "$prompt" > "$output_file" 2>/dev/null &
+  claude_pid=$!
+
+  local frame=0
+  while kill -0 "$claude_pid" 2>/dev/null; do
+    redraw_flames $(( frame % 3 ))
+    frame=$(( frame + 1 ))
+    sleep 0.25
+  done
+
+  if wait "$claude_pid" 2>/dev/null; then
+    last_output=$(<"$output_file")
+    rm -f "$output_file"
+    claude_pid=""
+    return 0
+  else
+    rm -f "$output_file"
+    claude_pid=""
+    return 1
+  fi
+}
+
+printf '%s' "$HIDE_CURSOR"
+echo
+draw_fireplace 0
+echo
+draw_bar
+
+while (( burned < tokens )); do
+  iteration=$(( iteration + 1 ))
+
+  if ! run_claude; then
+    draw_bar " (retrying)"
+    if ! run_claude; then
+      printf "\nerror: two consecutive claude calls failed; aborting.\n" >&2
+      exit 1
+    fi
+  fi
+
+  read -r this_call this_cost < <(jq -r '
+    [ ((.usage.input_tokens // 0) +
+       (.usage.cache_creation_input_tokens // 0) +
+       (.usage.cache_read_input_tokens // 0) +
+       (.usage.output_tokens // 0)),
+      (.total_cost_usd // 0)
+    ] | @tsv' <<<"$last_output")
+
+  if ! [[ "$this_call" =~ ^[0-9]+$ ]]; then
+    printf "\nerror: could not parse token usage from claude output\n" >&2
+    exit 1
+  fi
+
+  burned=$(( burned + this_call ))
+  total_cost=$(awk -v a="$total_cost" -v b="$this_cost" 'BEGIN{printf "%.6f", a+b}')
+  draw_bar
+done
+
+echo
+printf "done. burned %s tokens across %s call(s) (target was %s), spent \$%s.\n" \
+  "$burned" "$iteration" "$tokens" "$total_cost"
