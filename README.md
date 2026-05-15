@@ -4,7 +4,7 @@
 
 ### Because nothing gets you promoted faster than a six-figure token bill
 
-A bash one-liner that burns Claude Code **or Codex** tokens on purpose.
+A bash one-liner that burns Claude Code or Codex tokens on purpose.
 
 ```bash
 burn 50000  # burn 50,000 tokens
@@ -38,11 +38,11 @@ burn 50000 --backend codex            # 🤖 burn OpenAI tokens
 
 ## Features
 
-- 📈 **Make the CEO see how productive you are.** 🔥
-- 💸 **Investors will see how AI-innovative your company is.** 🚀
-- 🏆 **Top the internal Claude Code leaderboard.** 👑
-- 📊 **Pad your OKRs.** ✅
-- 🦄 **Justify next year's bigger AI budget.** 💰
+- 📈 **Make the CEO see how productive you are.**
+- 💸 **Investors will see how AI-innovative your company is.**
+- 🏆 **Top the internal Claude Code leaderboard.**
+- 📊 **Pad your OKRs.**
+- 🦄 **Justify next year's bigger AI budget.**
 
 ---
 
