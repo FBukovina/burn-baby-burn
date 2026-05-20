@@ -84,6 +84,8 @@ let iterationCalls = 0;
 let burnSpeed = 0;
 let telemetryLogs = [];
 let burnCompletedSuccessfully = true;
+let burnFailureSticky = false;
+let burnFailureMessage = '';
 
 // Timing metrics for speed calculations
 let lastTime = 0;
@@ -381,6 +383,15 @@ function updateProgress(pct, burned, target, cost, calls) {
 function parseProgressLine(rawLine) {
   const cleanLine = stripAnsi(rawLine).trim();
   if (!cleanLine) return false;
+
+  if (cleanLine.startsWith('BURN_ERROR\t')) {
+    const message = cleanLine.split('\t').slice(1).join('\t').trim();
+    burnCompletedSuccessfully = false;
+    burnFailureSticky = true;
+    burnFailureMessage = message || 'Burn process failed.';
+    appendTelemetry(`❌ ${burnFailureMessage}`);
+    return true;
+  }
 
   if (cleanLine.startsWith('BURN_PROGRESS\t')) {
     const parts = cleanLine.split('\t');
@@ -830,6 +841,14 @@ function handleConfigKey(str, key) {
 function handleBurnKey(str, key) {
   const isSpace = (key && key.name === 'space') || str === ' ';
   const isEscape = (key && key.name === 'escape') || str === '\u001b';
+
+  if (burnFailureSticky) {
+    burnFailureSticky = false;
+    setScreen('config');
+    focusedItem = 'backend';
+    isWarningNihilist = false;
+    return;
+  }
   
   if (isSpace || isEscape) {
     appendTelemetry(`${RED}⚠️ Interrupted by user. Extinguishing core...${RESET}`);
@@ -896,6 +915,8 @@ function startCombustion() {
   setScreen('burn');
   
   burnWasAborted = false;
+  burnFailureSticky = false;
+  burnFailureMessage = '';
   targetTokens = selectedPresetIdx === 4 ? customTokens : PRESETS[selectedPresetIdx];
   burnedTokens = 0;
   burnPercentage = 0;
@@ -913,11 +934,10 @@ function startCombustion() {
 
   const scriptPath = path.join(__dirname, 'burn');
   if (!fs.existsSync(scriptPath)) {
-    appendTelemetry(`❌ [system] Burn script not found: ${scriptPath}`);
+    burnFailureMessage = `Burn script not found: ${scriptPath}`;
+    appendTelemetry(`❌ [system] ${burnFailureMessage}`);
     burnCompletedSuccessfully = false;
-    returnToConfigTimer = setTimeout(() => {
-      if (activeScreen === 'burn') setScreen('config');
-    }, 2500);
+    burnFailureSticky = true;
     return;
   }
   
@@ -963,10 +983,9 @@ function startCombustion() {
     activeChild = null;
     stopAudioFeed();
     burnCompletedSuccessfully = false;
-    appendTelemetry(`❌ [system] Could not start burn process: ${error.message}`);
-    returnToConfigTimer = setTimeout(() => {
-      if (activeScreen === 'burn') setScreen('config');
-    }, 3000);
+    burnFailureSticky = true;
+    burnFailureMessage = `Could not start burn process: ${error.message}`;
+    appendTelemetry(`❌ [system] ${burnFailureMessage}`);
   });
 
   activeChild.on('close', (code) => {
@@ -978,18 +997,22 @@ function startCombustion() {
     }
     if (code === 0 && !burnWasAborted) {
       burnCompletedSuccessfully = true;
+      burnFailureSticky = false;
       setScreen('victory');
-    } else {
+    } else if (burnWasAborted) {
       burnCompletedSuccessfully = false;
-      appendTelemetry(
-        burnWasAborted
-          ? '🛑 [system] Combustion aborted.'
-          : `❌ [system] Process terminated with exit code: ${code}`
-      );
+      appendTelemetry('🛑 [system] Combustion aborted.');
       returnToConfigTimer = setTimeout(() => {
         returnToConfigTimer = null;
         if (activeScreen === 'burn') setScreen('config');
-      }, burnWasAborted ? 900 : 3000);
+      }, 900);
+    } else {
+      burnCompletedSuccessfully = false;
+      burnFailureSticky = true;
+      if (!burnFailureMessage) {
+        burnFailureMessage = `Process terminated with exit code: ${code}`;
+      }
+      appendTelemetry(`❌ [system] ${burnFailureMessage}`);
     }
   });
 }
@@ -1166,16 +1189,18 @@ function compileConfigScreen() {
 // 2. Compile Screen: Active Burn
 function compileBurnScreen() {
   let s = '';
+  const failed = burnFailureSticky && !activeChild;
 
-  s += `${RED}🔥 ${BOLD}${YELLOW}ACTIVE COMBUSTION ARENA${RESET} ${RED}•${RESET} ${CYAN}${backend.toUpperCase()} (${BACKEND_MODELS[backend][activeModelIdx].id})${RESET}\n`;
+  const title = failed ? `${BOLD}${RED}COMBUSTION FAILED${RESET}` : `${BOLD}${YELLOW}ACTIVE COMBUSTION ARENA${RESET}`;
+  s += `${RED}🔥 ${title} ${RED}•${RESET} ${CYAN}${backend.toUpperCase()} (${BACKEND_MODELS[backend][activeModelIdx].id})${RESET}\n`;
 
   // Two Column Layout
-  const dancerLines = DANCER_POSES[dancerFrame];
+  const dancerLines = failed ? DANCER_POSES[0] : DANCER_POSES[dancerFrame];
   
   // Left Column (Disco Dancer + Fire)
   const leftCol = [];
   dancerLines.forEach(l => leftCol.push(l));
-  leftCol.push(getFlickeringFlames(17, pulseTimerCount)); // ground fire
+  leftCol.push(failed ? `${DIM}░░░░░░░░░░░░░░░░░${RESET}` : getFlickeringFlames(17, pulseTimerCount)); // ground fire
 
   // Right Column (Metrics & Odometer)
   const pct = Math.min(100, burnPercentage);
@@ -1201,7 +1226,12 @@ function compileBurnScreen() {
   rightCol.push(`${BOLD}${YELLOW}OKRs:${RESET}   Ladder:  ${okrDraw(pct, 1.4)}`);
   rightCol.push(`       Manager: ${okrDraw(pct, 2.5)}`);
   rightCol.push(`       VC Depth:${okrDraw(pct, 4.0)}`);
-  rightCol.push(`${DIM}Press [Space] to Extinguish Flames (Abort)${RESET}`);
+  if (failed) {
+    rightCol.push(`${BOLD}${RED}Reason:${RESET} ${truncateVisible(burnFailureMessage || 'Burn process failed.', 48)}`);
+    rightCol.push(`${RED}${BOLD}Burn failed.${RESET} ${DIM}Press any key to return to Control Deck${RESET}`);
+  } else {
+    rightCol.push(`${DIM}Press [Space] to Extinguish Flames (Abort)${RESET}`);
+  }
 
   // Merge columns
   const maxLines = Math.max(leftCol.length, rightCol.length);

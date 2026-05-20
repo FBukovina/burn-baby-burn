@@ -345,6 +345,7 @@ total_cost=0.000000
 BAR_WIDTH=30
 cli_pid=""
 last_output=""
+last_error=""
 
 # Build CLI command for the chosen backend.
 case "$backend" in
@@ -464,10 +465,11 @@ trap on_interrupt INT
 # Run one CLI call in the background while animating flames. On success
 # leaves the parsed stdout in $last_output. Returns the CLI exit status.
 run_cli() {
-  local output_file
+  local output_file error_file
   output_file=$(mktemp)
+  error_file=$(mktemp)
   # </dev/null prevents codex from waiting on stdin when run in background.
-  "${cli_cmd[@]}" "$prompt" >"$output_file" 2>/dev/null </dev/null &
+  "${cli_cmd[@]}" "$prompt" >"$output_file" 2>"$error_file" </dev/null &
   cli_pid=$!
 
   local frame=0
@@ -481,13 +483,46 @@ run_cli() {
 
   if wait "$cli_pid" 2>/dev/null; then
     last_output=$(<"$output_file")
-    rm -f "$output_file"
+    last_error=""
+    rm -f "$output_file" "$error_file"
     cli_pid=""
     return 0
   else
-    rm -f "$output_file"
+    last_error=$(<"$error_file")
+    rm -f "$output_file" "$error_file"
     cli_pid=""
     return 1
+  fi
+}
+
+last_error_summary() {
+  awk '
+    NF {
+      line = $0
+    }
+    END {
+      gsub(/\t/, "  ", line)
+      gsub(/\r/, "", line)
+      print line
+    }
+  ' <<<"$last_error"
+}
+
+report_backend_failure() {
+  local err message
+  err=$(last_error_summary)
+  message="two consecutive ${backend} calls failed; aborting."
+  if [[ -n "$err" ]]; then
+    message="${message} Last error: ${err}"
+  fi
+
+  if ((TUI_CHILD)); then
+    printf 'BURN_ERROR\t%s\n' "$message"
+  fi
+
+  printf "\nerror: two consecutive %s calls failed; aborting.\n" "$backend" >&2
+  if [[ -n "$err" ]]; then
+    printf "last %s error: %s\n" "$backend" "$err" >&2
   fi
 }
 
@@ -540,7 +575,7 @@ while ((burned < tokens)); do
   if ! run_cli; then
     draw_bar " (retrying)"
     if ! run_cli; then
-      printf "\nerror: two consecutive %s calls failed; aborting.\n" "$backend" >&2
+      report_backend_failure
       exit 1
     fi
   fi
