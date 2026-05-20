@@ -7,7 +7,7 @@
  */
 
 const readline = require('readline');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
@@ -59,13 +59,20 @@ const ACHIEVEMENTS = [
 
 // Application State
 let activeScreen = 'config'; // 'config', 'burn', 'victory'
-let focusedItem = 'backend'; // 'backend', 'model', 'tokens', 'ignite'
+let focusedItem = 'backend'; // 'backend', 'auth', 'model', 'tokens', 'ignite'
 let backend = 'claude';
 let activeModelIdx = 0;
 let selectedPresetIdx = 1; // 50k default
 let customTokens = 250000;
 let isWarningNihilist = false;
 let isSmallScreen = false;
+let codexAuthState = 'unknown'; // 'unknown', 'checking', 'connected', 'logged-out', 'error'
+let codexAuthDetail = 'Not checked';
+let codexAuthCheckSeq = 0;
+let codexAuthCheck = null;
+let codexAuthFlowActive = false;
+let codexIgniteAfterAuth = false;
+let codexIgniteLoginAttempted = false;
 
 // Burn Stats
 let activeChild = null;
@@ -281,6 +288,34 @@ function costDisplay() {
   return costString === 'cost n/a' ? costString : `${costString} USD`;
 }
 
+function codexAuthDisplay() {
+  switch (codexAuthState) {
+    case 'checking':
+      return `${YELLOW}Checking...${RESET} ${DIM}${codexAuthDetail}${RESET}`;
+    case 'connected':
+      return `${GREEN}${BOLD}Connected${RESET} ${DIM}Space/Enter rechecks${RESET}`;
+    case 'logged-out':
+      return `${RED}${BOLD}Sign in to Codex${RESET} ${DIM}opens browser OAuth${RESET}`;
+    case 'error':
+      return `${RED}${BOLD}Recheck${RESET} ${DIM}${codexAuthDetail}${RESET}`;
+    case 'unknown':
+    default:
+      return `${YELLOW}${BOLD}Recheck${RESET} ${DIM}Codex login has not been checked${RESET}`;
+  }
+}
+
+function codexStatusDetail(stdout, stderr) {
+  const lines = stripAnsi(`${stdout}\n${stderr}`)
+    .split(/\r\n|\r|\n/)
+    .map(line => line.trim())
+    .filter(Boolean);
+  const usefulLines = lines.filter(line =>
+    !line.startsWith('WARNING:') &&
+    !line.includes('could not update PATH')
+  );
+  return usefulLines.find(line => /logged in/i.test(line)) || usefulLines[0] || lines[0] || '';
+}
+
 function isCoreVisualLine(line) {
   return (
     line.includes('▲') ||
@@ -403,6 +438,215 @@ function setScreen(newScreen) {
   process.stdout.write(CLEAR_SCREEN);
 }
 
+function configFields() {
+  return backend === 'codex'
+    ? ['backend', 'auth', 'model', 'tokens', 'ignite']
+    : ['backend', 'model', 'tokens', 'ignite'];
+}
+
+function normalizeFocusedItem() {
+  if (!configFields().includes(focusedItem)) {
+    focusedItem = 'backend';
+  }
+}
+
+function setBackend(nextBackend) {
+  if (backend === nextBackend) return;
+  backend = nextBackend;
+  activeModelIdx = 0;
+  codexIgniteAfterAuth = false;
+  codexIgniteLoginAttempted = false;
+  normalizeFocusedItem();
+
+  if (backend === 'codex') {
+    checkCodexAuthStatus();
+  }
+}
+
+function startRenderLoop() {
+  if (renderTimer) return;
+  renderTimer = setInterval(() => {
+    pulseTimerCount++;
+    drawScreen();
+  }, 150);
+}
+
+function stopRenderLoop() {
+  if (!renderTimer) return;
+  clearInterval(renderTimer);
+  renderTimer = null;
+}
+
+function pauseTUIForExternalCommand() {
+  stopRenderLoop();
+  process.stdout.write(CLEAR_SCREEN + SHOW_CURSOR + RESET + EXIT_ALT_SCREEN);
+  if (process.stdin.isTTY) {
+    try {
+      process.stdin.setRawMode(false);
+    } catch (e) {}
+    process.stdin.pause();
+  }
+}
+
+function resumeTUIAfterExternalCommand() {
+  if (cleanupComplete) return;
+  if (process.stdin.isTTY) {
+    try {
+      process.stdin.setRawMode(true);
+    } catch (e) {}
+    process.stdin.resume();
+  }
+  process.stdout.write(ENTER_ALT_SCREEN + HIDE_CURSOR + CLEAR_SCREEN);
+  startRenderLoop();
+}
+
+function checkCodexAuthStatus() {
+  const seq = ++codexAuthCheckSeq;
+  if (codexAuthCheck) {
+    try {
+      codexAuthCheck.kill();
+    } catch (e) {}
+    codexAuthCheck = null;
+  }
+
+  codexAuthState = 'checking';
+  codexAuthDetail = 'Checking Codex login...';
+
+  const child = spawn('codex', ['login', 'status'], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      PAGER: 'cat'
+    }
+  });
+  codexAuthCheck = child;
+
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', data => {
+    stdout += data.toString('utf8');
+  });
+  child.stderr.on('data', data => {
+    stderr += data.toString('utf8');
+  });
+  child.on('error', error => {
+    if (seq !== codexAuthCheckSeq || codexAuthCheck !== child) return;
+    codexAuthCheck = null;
+    codexAuthState = 'error';
+    codexAuthDetail = error.code === 'ENOENT'
+      ? 'codex CLI not found on PATH'
+      : `status check failed: ${error.message}`;
+    finishPendingCodexIgnition();
+  });
+  child.on('close', code => {
+    if (seq !== codexAuthCheckSeq || codexAuthCheck !== child) return;
+    codexAuthCheck = null;
+
+    const detail = codexStatusDetail(stdout, stderr);
+    if (code === 0) {
+      codexAuthState = 'connected';
+      codexAuthDetail = detail || 'Logged in';
+    } else {
+      codexAuthState = 'logged-out';
+      codexAuthDetail = detail || 'Sign in with Codex OAuth';
+    }
+    finishPendingCodexIgnition();
+  });
+}
+
+function finishPendingCodexIgnition() {
+  if (!codexIgniteAfterAuth) return;
+
+  if (backend !== 'codex') {
+    codexIgniteAfterAuth = false;
+    codexIgniteLoginAttempted = false;
+    return;
+  }
+
+  if (codexAuthState === 'connected') {
+    codexIgniteAfterAuth = false;
+    codexIgniteLoginAttempted = false;
+    startCombustion();
+    return;
+  }
+
+  if (codexAuthState === 'error' && codexAuthDetail === 'codex CLI not found on PATH') {
+    codexIgniteAfterAuth = false;
+    codexIgniteLoginAttempted = false;
+    focusedItem = 'auth';
+    return;
+  }
+
+  if (codexAuthState === 'logged-out' || codexAuthState === 'error') {
+    if (codexIgniteLoginAttempted) {
+      codexIgniteAfterAuth = false;
+      codexIgniteLoginAttempted = false;
+      focusedItem = 'auth';
+      if (codexAuthState === 'logged-out') {
+        codexAuthDetail = 'Codex login did not connect';
+      }
+      return;
+    }
+
+    runCodexLoginFlow({ continueAfterAuth: true });
+  }
+}
+
+function runCodexLoginFlow({ continueAfterAuth = false } = {}) {
+  if (codexAuthFlowActive) return;
+  if (codexAuthState === 'checking') {
+    if (continueAfterAuth) codexIgniteAfterAuth = true;
+    return;
+  }
+
+  if (continueAfterAuth) {
+    codexIgniteAfterAuth = true;
+    codexIgniteLoginAttempted = true;
+  }
+
+  codexAuthFlowActive = true;
+  codexAuthState = 'checking';
+  codexAuthDetail = 'Launching Codex OAuth...';
+  drawScreen();
+  pauseTUIForExternalCommand();
+
+  console.log('\nLaunching Codex OAuth. Follow the browser login, then return here.\n');
+  const result = spawnSync('codex', ['login'], {
+    stdio: 'inherit',
+    env: {
+      ...process.env,
+      PAGER: 'cat'
+    }
+  });
+
+  resumeTUIAfterExternalCommand();
+  codexAuthFlowActive = false;
+
+  if (result.error) {
+    codexIgniteAfterAuth = false;
+    codexIgniteLoginAttempted = false;
+    focusedItem = 'auth';
+    codexAuthState = 'error';
+    codexAuthDetail = result.error.code === 'ENOENT'
+      ? 'codex CLI not found on PATH'
+      : `login failed: ${result.error.message}`;
+    return;
+  }
+
+  if (result.status !== 0) {
+    codexIgniteAfterAuth = false;
+    codexIgniteLoginAttempted = false;
+    focusedItem = 'auth';
+    codexAuthState = 'error';
+    codexAuthDetail = result.signal
+      ? `codex login stopped by ${result.signal}`
+      : `codex login exited with ${result.status}`;
+    return;
+  }
+
+  checkCodexAuthStatus();
+}
+
 // Initialization and keystroke capture
 function startTUI() {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
@@ -422,6 +666,8 @@ function startTUI() {
       exitTUI(130);
     }
 
+    if (codexAuthFlowActive) return;
+
     if (activeScreen === 'config') {
       handleConfigKey(str, key);
     } else if (activeScreen === 'burn') {
@@ -432,10 +678,7 @@ function startTUI() {
   });
 
   // Start 150ms render loop for smooth flicker-free animations (6.6 FPS)
-  renderTimer = setInterval(() => {
-    pulseTimerCount++;
-    drawScreen();
-  }, 150);
+  startRenderLoop();
 
   process.once('SIGINT', () => exitTUI(130));
   process.once('SIGTERM', () => exitTUI(143));
@@ -472,9 +715,12 @@ function cleanup() {
     } catch (e) {}
     activeChild = null;
   }
-  if (renderTimer) {
-    clearInterval(renderTimer);
-    renderTimer = null;
+  stopRenderLoop();
+  if (codexAuthCheck) {
+    try {
+      codexAuthCheck.kill();
+    } catch (e) {}
+    codexAuthCheck = null;
   }
   if (process.stdin.isTTY) {
     try {
@@ -487,6 +733,8 @@ function cleanup() {
 
 // Config Screen Key Handlers
 function handleConfigKey(str, key) {
+  normalizeFocusedItem();
+
   const isUp = (key && key.name === 'up') || str === '\u001b[A' || str === '\u001bOA';
   const isDown = (key && key.name === 'down') || str === '\u001b[B' || str === '\u001bOB';
   const isLeft = (key && key.name === 'left') || str === '\u001b[D' || str === '\u001bOD';
@@ -511,12 +759,12 @@ function handleConfigKey(str, key) {
 
   // Standard Navigation
   if (isUp) {
-    const fields = ['backend', 'model', 'tokens', 'ignite'];
+    const fields = configFields();
     let idx = fields.indexOf(focusedItem) - 1;
     if (idx < 0) idx = fields.length - 1;
     focusedItem = fields[idx];
   } else if (isDown) {
-    const fields = ['backend', 'model', 'tokens', 'ignite'];
+    const fields = configFields();
     let idx = (fields.indexOf(focusedItem) + 1) % fields.length;
     focusedItem = fields[idx];
   }
@@ -524,8 +772,15 @@ function handleConfigKey(str, key) {
   // Toggling options
   if (focusedItem === 'backend') {
     if (isLeft || isRight || isSpace) {
-      backend = backend === 'claude' ? 'codex' : 'claude';
-      activeModelIdx = 0; // reset model index
+      setBackend(backend === 'claude' ? 'codex' : 'claude');
+    }
+  } else if (focusedItem === 'auth') {
+    if (isEnter || isSpace) {
+      if (codexAuthState === 'connected') {
+        checkCodexAuthStatus();
+      } else {
+        runCodexLoginFlow();
+      }
     }
   } else if (focusedItem === 'model') {
     const modelsCount = BACKEND_MODELS[backend].length;
@@ -592,6 +847,52 @@ function handleVictoryKey(str, key) {
 
 // Spawning and Running the Burn Core
 function igniteCombustion() {
+  if (backend !== 'codex') {
+    startCombustion();
+    return;
+  }
+
+  if (codexAuthState === 'connected') {
+    startCombustion();
+    return;
+  }
+
+  codexIgniteAfterAuth = true;
+  codexIgniteLoginAttempted = false;
+  focusedItem = 'auth';
+
+  if (codexAuthState === 'unknown') {
+    checkCodexAuthStatus();
+    return;
+  }
+
+  if (codexAuthState === 'checking') {
+    codexAuthDetail = 'Will ignite after Codex auth check...';
+    return;
+  }
+
+  if (codexAuthState === 'error' && codexAuthDetail === 'codex CLI not found on PATH') {
+    codexIgniteAfterAuth = false;
+    codexIgniteLoginAttempted = false;
+    return;
+  }
+
+  if (codexAuthState === 'logged-out' || codexAuthState === 'error') {
+    runCodexLoginFlow({ continueAfterAuth: true });
+  }
+}
+
+function startCombustion() {
+  if (backend === 'codex' && codexAuthState !== 'connected') {
+    focusedItem = 'auth';
+    if (codexAuthState === 'unknown') {
+      checkCodexAuthStatus();
+    } else if (codexAuthState === 'logged-out') {
+      codexAuthDetail = 'Sign in before igniting Codex';
+    }
+    return;
+  }
+
   setScreen('burn');
   
   burnWasAborted = false;
@@ -774,6 +1075,8 @@ function drawScreen() {
 
 // 1. Compile Screen: Config
 function compileConfigScreen() {
+  normalizeFocusedItem();
+
   let s = '';
   
   s += `${ORANGE}┌────────────────────────────────────────────────────────┐${RESET}\n`;
@@ -785,6 +1088,11 @@ function compileConfigScreen() {
   const claudeBullet = backend === 'claude' ? `${ORANGE}●${RESET}` : ' ';
   const codexBullet = backend === 'codex' ? `${ORANGE}●${RESET}` : ' ';
   s += `${bSel}${BOLD}🌐 BACKEND:${RESET}   [${claudeBullet}] Claude Code (3.5)    [${codexBullet}] OpenAI Codex (GPT-5)\n`;
+
+  if (backend === 'codex') {
+    const aSel = focusedItem === 'auth' ? `${ORANGE}▶${RESET} ` : '  ';
+    s += `${aSel}${BOLD}🔐 AUTH:${RESET}      ${codexAuthDisplay()}\n`;
+  }
 
   // Section 2: Model Selection
   const mSel = focusedItem === 'model' ? `${ORANGE}▶${RESET} ` : '  ';
@@ -830,6 +1138,9 @@ function compileConfigScreen() {
   } else {
     const modelsList = BACKEND_MODELS[backend];
     s += `     ${DIM}Desc: ${modelsList[activeModelIdx].desc}${RESET}\n`;
+  }
+  if (backend === 'codex') {
+    s += `     ${DIM}Ignite opens browser OAuth if Codex is not connected.${RESET}\n`;
   }
 
   s += `${DIM}────────────────────────────────────────────────────────${RESET}\n`;

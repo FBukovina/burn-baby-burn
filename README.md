@@ -32,6 +32,12 @@ burn 100000 --model sonnet            # walk away
 burn 50000 --backend codex            # 🤖 burn OpenAI tokens
 ```
 
+Run `burn` with no arguments to open the TUI. When you select OpenAI
+Codex and press `IGNITE`, the TUI launches the default browser OAuth
+flow if Codex is not already connected. You can also use the `AUTH` row
+to recheck or sign in manually, or run `codex login` before opening
+`burn`.
+
 ![burn in action](screenshot.png)
 
 ---
