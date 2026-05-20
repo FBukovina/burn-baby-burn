@@ -26,9 +26,10 @@ Drops `burn` into `~/.local/bin` — no sudo, no Homebrew tap. Needs
 ## Usage
 
 ```bash
-burn 10000                            # the minimum
+burn 10000                            # the Claude minimum
 burn 50000 --model haiku              # cheap and fast
 burn 100000 --model sonnet            # walk away
+burn 13000 --backend codex            # the Codex minimum
 burn 50000 --backend codex            # 🤖 burn OpenAI tokens
 ```
 
@@ -36,7 +37,7 @@ Run `burn` with no arguments to open the TUI. When you select OpenAI
 Codex and press `IGNITE`, the TUI launches the default browser OAuth
 flow if Codex is not already connected. You can also use the `AUTH` row
 to recheck or sign in manually, or run `codex login` before opening
-`burn`.
+`burn`. The TUI adjusts the minimum target automatically per backend.
 
 ![burn in action](screenshot.png)
 

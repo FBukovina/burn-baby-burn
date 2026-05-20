@@ -46,7 +46,11 @@ const BACKEND_MODELS = {
   ]
 };
 
-const PRESETS = [10000, 50000, 100000, 500000, 'custom'];
+const MIN_TARGET_TOKENS = {
+  claude: 10000,
+  codex: 13000
+};
+const PRESETS = ['min', 50000, 100000, 500000, 'custom'];
 
 const ACHIEVEMENTS = [
   "Master of Corporate Theater",
@@ -288,6 +292,27 @@ function splitBufferedLines(buffer, data) {
 
 function costDisplay() {
   return costString === 'cost n/a' ? costString : `${costString} USD`;
+}
+
+function minTargetTokens() {
+  return MIN_TARGET_TOKENS[backend] || MIN_TARGET_TOKENS.claude;
+}
+
+function presetTokenValue(preset) {
+  return preset === 'min' ? minTargetTokens() : preset;
+}
+
+function selectedTargetTokens() {
+  if (selectedPresetIdx === PRESETS.length - 1) {
+    return Math.max(customTokens, minTargetTokens());
+  }
+  return presetTokenValue(PRESETS[selectedPresetIdx]);
+}
+
+function formatPresetLabel(preset) {
+  if (preset === 'custom') return '[Custom]';
+  const value = presetTokenValue(preset);
+  return value % 1000 === 0 ? `[${value / 1000}k]` : `[${value.toLocaleString()}]`;
 }
 
 function codexAuthDisplay() {
@@ -801,9 +826,10 @@ function handleConfigKey(str, key) {
       activeModelIdx = (activeModelIdx + 1) % modelsCount;
     }
   } else if (focusedItem === 'tokens') {
+    const minTokens = minTargetTokens();
     if (isLeft) {
-      if (selectedPresetIdx === 4 && customTokens > 10000) {
-        customTokens -= 25000;
+      if (selectedPresetIdx === 4 && customTokens > minTokens) {
+        customTokens = Math.max(minTokens, customTokens - 25000);
       } else if (selectedPresetIdx > 0) {
         selectedPresetIdx--;
       }
@@ -821,6 +847,9 @@ function handleConfigKey(str, key) {
       }
     } else if (isSpace) {
       selectedPresetIdx = (selectedPresetIdx + 1) % PRESETS.length;
+      if (selectedPresetIdx === 4 && customTokens < minTokens) {
+        customTokens = minTokens;
+      }
       if (PRESETS[selectedPresetIdx] === 'custom' && customTokens >= 1000000) {
         isWarningNihilist = true;
       }
@@ -917,7 +946,7 @@ function startCombustion() {
   burnWasAborted = false;
   burnFailureSticky = false;
   burnFailureMessage = '';
-  targetTokens = selectedPresetIdx === 4 ? customTokens : PRESETS[selectedPresetIdx];
+  targetTokens = selectedTargetTokens();
   burnedTokens = 0;
   burnPercentage = 0;
   costString = 'cost n/a';
@@ -1135,7 +1164,7 @@ function compileConfigScreen() {
   s += `${tSel}${BOLD}💸 TARGET:${RESET}    `;
   PRESETS.forEach((p, idx) => {
     const isSelected = selectedPresetIdx === idx;
-    let label = p === 'custom' ? '[Custom]' : `[${(p/1000)}k]`;
+    let label = formatPresetLabel(p);
     const color = isSelected ? GREEN : (focusedItem === 'tokens' ? RESET : DIM);
     const wrap = isSelected ? `${BOLD}${color}` : `${DIM}`;
     s += `${wrap}${label}${RESET}  `;
@@ -1145,19 +1174,20 @@ function compileConfigScreen() {
   // Description / Custom Slider
   if (selectedPresetIdx === 4) {
     const maxVal = 1000000;
-    const minVal = 10000;
-    const pct = (customTokens - minVal) / (maxVal - minVal);
+    const minVal = minTargetTokens();
+    const visibleCustomTokens = Math.max(customTokens, minVal);
+    const pct = (visibleCustomTokens - minVal) / (maxVal - minVal);
     const sliderWidth = 15;
     const filled = Math.round(pct * sliderWidth);
     const empty = sliderWidth - filled;
     const sliderBar = `${RED}█${RESET}`.repeat(filled) + `${DIM}░${RESET}`.repeat(empty);
     
     let desc = '';
-    if (customTokens <= 100000) desc = "Satisfactory OKR padding.";
-    else if (customTokens <= 500000) desc = "Significant metrics!";
+    if (visibleCustomTokens <= 100000) desc = "Satisfactory OKR padding.";
+    else if (visibleCustomTokens <= 500000) desc = "Significant metrics!";
     else desc = "EXTREME nihilism! CEO promotion or fire. 🌋";
     
-    s += `     ${BOLD}${ORANGE}Slider:${RESET} <─${sliderBar}─> ${BOLD}${GREEN}${customTokens.toLocaleString()}${RESET} tokens (${DIM}${desc}${RESET})\n`;
+    s += `     ${BOLD}${ORANGE}Slider:${RESET} <─${sliderBar}─> ${BOLD}${GREEN}${visibleCustomTokens.toLocaleString()}${RESET} tokens (${DIM}${desc}${RESET})\n`;
   } else {
     const modelsList = BACKEND_MODELS[backend];
     s += `     ${DIM}Desc: ${modelsList[activeModelIdx].desc}${RESET}\n`;
