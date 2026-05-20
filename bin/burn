@@ -17,6 +17,8 @@ FILLER_TOKENS=1000
 CLAUDE_SYSTEM_OVERHEAD_TOKENS=9000  # claude -p with --tools ""
 CODEX_SYSTEM_OVERHEAD_TOKENS=12000  # codex exec --sandbox read-only
 FILLER_LINE="Burn baby burn, this is a disco inferno, burning tokens is for great engineers. "
+TUI_CHILD=0
+[[ "${BURN_TUI_CHILD:-}" == "1" ]] && TUI_CHILD=1
 
 usage() {
   cat <<EOF
@@ -92,6 +94,20 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$tokens" ]]; then
+  if [[ -t 0 && -t 1 ]]; then
+    if ! command -v node >/dev/null 2>&1; then
+      echo "error: No token count provided, and 'node' is not installed to launch the TUI." >&2
+      usage >&2
+      exit 2
+    fi
+    if [[ ! -f "$SCRIPT_DIR/tui.js" ]]; then
+      echo "error: TUI entrypoint not found at '$SCRIPT_DIR/tui.js'." >&2
+      usage >&2
+      exit 1
+    fi
+    exec node "$SCRIPT_DIR/tui.js"
+  fi
+
   usage >&2
   exit 2
 fi
@@ -178,7 +194,17 @@ for ((i = 0; i < repeats; i++)); do
 done
 prompt=$(printf "Reply with the single word 'burned' and nothing else. Ignore the filler text below; it exists only to consume tokens.\n\n%s" "$filler")
 
-if [[ -t 1 ]]; then
+if ((TUI_CHILD)); then
+  ORANGE=''
+  MAGENTA=''
+  CYAN=''
+  RED=''
+  YELLOW=''
+  DIM=''
+  RESET=''
+  HIDE_CURSOR=''
+  SHOW_CURSOR=''
+elif [[ -t 1 || -n "${FORCE_COLOR:-}" || -n "${CLICOLOR_FORCE:-}" ]]; then
   ORANGE=$'\033[1;33m'
   MAGENTA=$'\033[1;35m'
   CYAN=$'\033[1;36m'
@@ -367,6 +393,13 @@ draw_bar() {
   local pct filled empty bar="" i suffix="${1:-}"
   pct=$((burned * 100 / tokens))
   ((pct > 100)) && pct=100
+
+  if ((TUI_CHILD)); then
+    printf 'BURN_PROGRESS\t%d\t%d\t%d\t%s\t%d\t%s\n' \
+      "$pct" "$burned" "$tokens" "$(format_cost_field)" "$iteration" "$suffix"
+    return
+  fi
+
   filled=$((pct * BAR_WIDTH / 100))
   empty=$((BAR_WIDTH - filled))
   for ((i = 0; i < filled; i++)); do bar+='█'; done
@@ -439,7 +472,9 @@ run_cli() {
 
   local frame=0
   while kill -0 "$cli_pid" 2>/dev/null; do
-    redraw_disco $((frame % 4))
+    if ! ((TUI_CHILD)); then
+      redraw_disco $((frame % 4))
+    fi
     frame=$((frame + 1))
     sleep 0.4
   done
@@ -489,10 +524,14 @@ parse_usage() {
   esac
 }
 
-printf '%s' "$HIDE_CURSOR"
-echo
-draw_disco 0
-echo
+if ((TUI_CHILD)); then
+  :
+else
+  printf '%s' "$HIDE_CURSOR"
+  echo
+  draw_disco 0
+  echo
+fi
 draw_bar
 
 while ((burned < tokens)); do
